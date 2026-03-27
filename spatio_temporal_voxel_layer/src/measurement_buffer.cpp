@@ -453,17 +453,60 @@ void MeasurementBuffer::ApplyRingSlopeFilter(
     }
 
     std::sort(col_pts.begin(), col_pts.end(),
-      [](const RingPoint & a, const RingPoint & b) {return a.z < b.z;});
+      [](const RingPoint & a, const RingPoint & b) { return a.z < b.z; });
 
-    // For each interior point, require BOTH elevation neighbours to agree
-    // it looks like ground before suppressing it. This protects obstacle
-    // edges where one neighbour is on the obstacle (high ratio) and one is
-    // on the ground (low ratio) — they will not both agree, so the edge
-    // point is kept.
     const size_t N = col_pts.size();
+
+    // Cumulative horizontal distance along the z-sorted column.
+    // Using a static vector avoids per-column heap allocation.
+    static thread_local std::vector<float> s_buf;
+    static thread_local std::vector<float> res_buf;
+    s_buf.resize(N);
+    res_buf.resize(N);
+
+    s_buf[0] = 0.0f;
+    for (size_t i = 1; i < N; ++i) {
+      const float dx = col_pts[i].x - col_pts[i-1].x;
+      const float dy = col_pts[i].y - col_pts[i-1].y;
+      s_buf[i] = s_buf[i-1] + std::sqrt(dx*dx + dy*dy);
+    }
+
+    // Least-squares linear fit: z = m*s + b
+    // Detrends the incline so residuals measure deviation from the road plane.
+    float sum_s = 0.0f, sum_z = 0.0f, sum_ss = 0.0f, sum_sz = 0.0f;
     for (size_t i = 0; i < N; ++i) {
-      const float r_below = (i > 0)     ? slope_ratio(col_pts[i-1], col_pts[i]) : 0.0f;
-      const float r_above = (i < N - 1) ? slope_ratio(col_pts[i], col_pts[i+1]) : 0.0f;
+      sum_s  += s_buf[i];
+      sum_z  += col_pts[i].z;
+      sum_ss += s_buf[i] * s_buf[i];
+      sum_sz += s_buf[i] * col_pts[i].z;
+    }
+    const float fn    = static_cast<float>(N);
+    const float denom = fn * sum_ss - sum_s * sum_s;
+    float m_fit = 0.0f, b_fit = 0.0f;
+    if (std::abs(denom) > 1e-6f) {
+      m_fit = (fn * sum_sz - sum_s * sum_z) / denom;
+      b_fit = (sum_z - m_fit * sum_s) / fn;
+    }
+
+    for (size_t i = 0; i < N; ++i) {
+      res_buf[i] = col_pts[i].z - (m_fit * s_buf[i] + b_fit);
+    }
+
+    // Slope computed on residuals, not raw z.
+    // slope_threshold now means: suppress points that deviate less than
+    // ~atan(threshold) degrees from the dominant road slope — incline-agnostic.
+    auto residual_slope = [&](size_t i, size_t j) -> float {
+      const float dz  = std::abs(res_buf[j] - res_buf[i]);
+      const float dxy = std::sqrt(
+        (col_pts[j].x - col_pts[i].x) * (col_pts[j].x - col_pts[i].x) +
+        (col_pts[j].y - col_pts[i].y) * (col_pts[j].y - col_pts[i].y));
+      if (dz < min_dz_f || dxy < kMinDxy) { return 0.0f; }
+      return dz / dxy;
+    };
+
+    for (size_t i = 0; i < N; ++i) {
+      const float r_below = (i > 0)     ? residual_slope(i-1, i) : 0.0f;
+      const float r_above = (i < N - 1) ? residual_slope(i, i+1) : 0.0f;
       if (r_below <= slope_thresh && r_above <= slope_thresh) {
         nan_point(col_pts[i].row, col);
       }
