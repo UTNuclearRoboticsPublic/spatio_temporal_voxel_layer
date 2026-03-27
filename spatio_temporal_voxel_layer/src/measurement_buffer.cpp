@@ -431,7 +431,7 @@ void MeasurementBuffer::ApplyRingSlopeFilter(
     const float dxy = std::sqrt(
       (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
     if (dz < min_dz_f || dxy < kMinDxy) {
-      return std::numeric_limits<float>::max();
+      return 0.0f;   // near-flat → ground, not obstacle
     }
     return dz / dxy;
   };
@@ -461,9 +461,9 @@ void MeasurementBuffer::ApplyRingSlopeFilter(
     // on the ground (low ratio) — they will not both agree, so the edge
     // point is kept.
     const size_t N = col_pts.size();
-    for (size_t i = 1; i < N - 1; ++i) {
-      const float r_below = slope_ratio(col_pts[i - 1], col_pts[i]);
-      const float r_above = slope_ratio(col_pts[i],     col_pts[i + 1]);
+    for (size_t i = 0; i < N; ++i) {
+      const float r_below = (i > 0)     ? slope_ratio(col_pts[i-1], col_pts[i]) : 0.0f;
+      const float r_above = (i < N - 1) ? slope_ratio(col_pts[i], col_pts[i+1]) : 0.0f;
       if (r_below <= slope_thresh && r_above <= slope_thresh) {
         nan_point(col_pts[i].row, col);
       }
