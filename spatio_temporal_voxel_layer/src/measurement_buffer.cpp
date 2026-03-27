@@ -78,6 +78,9 @@ MeasurementBuffer::MeasurementBuffer(
   _enabled(enabled), _model_type(model_type), clock_(clock), logger_(logger)
 /*****************************************************************************/
 {
+  _ring_slope_filter_enabled = false;
+  _slope_threshold = 1.0;
+  _min_dz = 0.03;
 }
 
 /*****************************************************************************/
@@ -144,6 +147,12 @@ void MeasurementBuffer::BufferROSCloud(
       _global_frame, cloud.header.frame_id,
       tf2_ros::fromMsg(cloud.header.stamp));
     tf2::doTransform(cloud, *cld_global, tf_stamped);
+
+    // Apply ring slope ground filter while the organized cloud structure
+    // (height x width) is still intact — before PCL conversion flattens it
+    if (_ring_slope_filter_enabled) {
+      ApplyRingSlopeFilter(*cld_global);
+    }
 
     pcl::PCLPointCloud2::Ptr cloud_pcl(new pcl::PCLPointCloud2());
     pcl::PCLPointCloud2::Ptr cloud_filtered(new pcl::PCLPointCloud2());
@@ -350,6 +359,116 @@ void MeasurementBuffer::Unlock(void)
 /*****************************************************************************/
 {
   _lock.unlock();
+}
+
+/*****************************************************************************/
+void MeasurementBuffer::SetRingSlopeFilter(
+  const bool & enabled,
+  const double & slope_threshold,
+  const double & min_dz)
+/*****************************************************************************/
+{
+  _ring_slope_filter_enabled = enabled;
+  _slope_threshold = slope_threshold;
+  _min_dz = min_dz;
+}
+
+/*****************************************************************************/
+void MeasurementBuffer::ApplyRingSlopeFilter(
+  sensor_msgs::msg::PointCloud2 & cloud) const
+/*****************************************************************************/
+{
+  // Requires an organized cloud (height > 1). The Ouster always publishes
+  // organized clouds. Unorganized clouds pass through unchanged.
+  if (cloud.height <= 1) {
+    return;
+  }
+
+  // Locate x, y, z field byte offsets within the point stride
+  int x_off = -1, y_off = -1, z_off = -1;
+  for (const auto & field : cloud.fields) {
+    if (field.name == "x") {x_off = static_cast<int>(field.offset);}
+    if (field.name == "y") {y_off = static_cast<int>(field.offset);}
+    if (field.name == "z") {z_off = static_cast<int>(field.offset);}
+  }
+  if (x_off < 0 || y_off < 0 || z_off < 0) {
+    return;
+  }
+
+  const uint32_t W  = cloud.width;
+  const uint32_t H  = cloud.height;
+  const uint32_t ps = cloud.point_step;
+  const uint32_t rs = cloud.row_step;
+  uint8_t * data    = cloud.data.data();
+
+  auto read_f = [&](uint32_t row, uint32_t col, int off) -> float {
+    float v;
+    std::memcpy(&v, data + row * rs + col * ps + off, sizeof(float));
+    return v;
+  };
+
+  auto nan_point = [&](uint32_t row, uint32_t col) {
+    constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+    uint8_t * p = data + row * rs + col * ps;
+    std::memcpy(p + x_off, &nan, sizeof(float));
+    std::memcpy(p + y_off, &nan, sizeof(float));
+    std::memcpy(p + z_off, &nan, sizeof(float));
+  };
+
+  // Per-column working buffer: finite returns sorted by z.
+  // Sorting by z gives true elevation order regardless of how the Ouster
+  // driver orders beam rows in the organized cloud.
+  struct RingPoint {float x, y, z; uint32_t row;};
+  std::vector<RingPoint> col_pts;
+  col_pts.reserve(H);
+
+  const float slope_thresh = static_cast<float>(_slope_threshold);
+  const float min_dz_f     = static_cast<float>(_min_dz);
+  constexpr float kMinDxy  = 1e-3f;
+
+  auto slope_ratio = [&](const RingPoint & a, const RingPoint & b) -> float {
+    const float dz  = std::abs(b.z - a.z);
+    const float dxy = std::sqrt(
+      (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+    if (dz < min_dz_f || dxy < kMinDxy) {
+      return std::numeric_limits<float>::max();
+    }
+    return dz / dxy;
+  };
+
+  for (uint32_t col = 0; col < W; ++col) {
+    col_pts.clear();
+
+    for (uint32_t row = 0; row < H; ++row) {
+      const float x = read_f(row, col, x_off);
+      const float y = read_f(row, col, y_off);
+      const float z = read_f(row, col, z_off);
+      if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
+        col_pts.push_back({x, y, z, row});
+      }
+    }
+
+    if (col_pts.size() < 3) {
+      continue;
+    }
+
+    std::sort(col_pts.begin(), col_pts.end(),
+      [](const RingPoint & a, const RingPoint & b) {return a.z < b.z;});
+
+    // For each interior point, require BOTH elevation neighbours to agree
+    // it looks like ground before suppressing it. This protects obstacle
+    // edges where one neighbour is on the obstacle (high ratio) and one is
+    // on the ground (low ratio) — they will not both agree, so the edge
+    // point is kept.
+    const size_t N = col_pts.size();
+    for (size_t i = 1; i < N - 1; ++i) {
+      const float r_below = slope_ratio(col_pts[i - 1], col_pts[i]);
+      const float r_above = slope_ratio(col_pts[i],     col_pts[i + 1]);
+      if (r_below <= slope_thresh && r_above <= slope_thresh) {
+        nan_point(col_pts[i].row, col);
+      }
+    }
+  }
 }
 
 }  // namespace buffer

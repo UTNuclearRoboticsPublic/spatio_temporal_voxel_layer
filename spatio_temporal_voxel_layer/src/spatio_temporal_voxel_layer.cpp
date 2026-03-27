@@ -204,6 +204,11 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     declareParameter(source + "." + "enabled", rclcpp::ParameterValue(true));
     declareParameter(source + "." + "model_type", rclcpp::ParameterValue(0));
 
+    // ring slope ground filter params
+    declareParameter(source + "." + "ring_slope_filter_enabled", rclcpp::ParameterValue(false));
+    declareParameter(source + "." + "slope_threshold", rclcpp::ParameterValue(1.0));
+    declareParameter(source + "." + "min_dz", rclcpp::ParameterValue(0.03));
+
     node->get_parameter(name_ + "." + source + "." + "topic", topic);
     node->get_parameter(name_ + "." + source + "." + "sensor_frame", sensor_frame);
     node->get_parameter(
@@ -245,6 +250,19 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
     node->get_parameter(name_ + "." + source + "." + "model_type", model_type_int);
     ModelType model_type = static_cast<ModelType>(model_type_int);
 
+    bool ring_slope_filter_enabled = false;
+    double slope_threshold = 1.0;
+    double ring_slope_min_dz = 0.03;
+    node->get_parameter(
+      name_ + "." + source + "." + "ring_slope_filter_enabled",
+      ring_slope_filter_enabled);
+    node->get_parameter(
+      name_ + "." + source + "." + "slope_threshold",
+      slope_threshold);
+    node->get_parameter(
+      name_ + "." + source + "." + "min_dz",
+      ring_slope_min_dz);
+
     if (filter_str == "passthrough") {
       RCLCPP_INFO(logger_, "Passthough filter activated.");
       filter = buffer::Filters::PASSTHROUGH;
@@ -272,6 +290,9 @@ void SpatioTemporalVoxelLayer::onInitialize(void)
           decay_acceleration, marking, clearing, _voxel_size,
           filter, voxel_min_points, enabled, clear_after_reading, model_type,
           node->get_clock(), node->get_logger())));
+
+    _observation_buffers.back()->SetRingSlopeFilter(
+      ring_slope_filter_enabled, slope_threshold, ring_slope_min_dz);
 
     // Add buffer to marking observation buffers
     if (marking) {

@@ -40,6 +40,10 @@
 #define SPATIO_TEMPORAL_VOXEL_LAYER__MEASUREMENT_BUFFER_HPP_
 
 // STL
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <vector>
 #include <list>
 #include <string>
@@ -136,6 +140,10 @@ public:
   void SetVerticalFovPadding(const double & vertical_fov_padding);
   void SetHorizontalFovAngle(const double & horizontal_fov_angle);
   void SetVerticalFovAngle(const double & vertical_fov_angle);
+  void SetRingSlopeFilter(
+    const bool & enabled,
+    const double & slope_threshold,
+    const double & min_dz);
 
   // State knoweldge if sensors are operating as expected
   bool UpdatedAtExpectedRate(void) const;
@@ -150,6 +158,10 @@ public:
 private:
   // Removing old observations from buffer
   void RemoveStaleObservations(void);
+
+  // Ring slope ground filter — runs on the organized PointCloud2 in the global
+  // frame before PCL conversion destroys the ring/column topology
+  void ApplyRingSlopeFilter(sensor_msgs::msg::PointCloud2 & cloud) const;
 
   tf2_ros::Buffer & _buffer;
   const rclcpp::Duration _observation_keep_time, _expected_update_rate;
@@ -167,6 +179,11 @@ private:
   ModelType _model_type;
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Logger logger_;
+
+  // Ring slope ground filter parameters
+  bool _ring_slope_filter_enabled;
+  double _slope_threshold;  // dz/dxy <= this is suppressed as ground
+  double _min_dz;           // |dz| below this is ignored (noise floor, metres)
 };
 
 }  // namespace buffer
